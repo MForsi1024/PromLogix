@@ -1,0 +1,62 @@
+[18-Jul-2026 09:38:15 Europe/Moscow] Rate limit failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:38:18 Europe/Moscow] Rate limit failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:38:24 Europe/Moscow] Rate limit failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:39:23 Europe/Moscow] Rate limit failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:54:03 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:54:12 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:57:34 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:57:36 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 09:59:54 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 10:00:52 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 10:44:57 Europe/Moscow] Rate limit state failure: SQLSTATE[42S02]: Base table or view not found: 1146 Table 'byte75tpe_asu24.rate_limits' doesn't exist
+[18-Jul-2026 11:07:39 Europe/Moscow] PHP Fatal error:  Uncaught PDOException: SQLSTATE[42S22]: Column not found: 1054 Unknown column 'password_changed_at' in 'field list' in /home/b/byte75tpe/asu24/public_html/index.php:200
+Stack trace:
+#0 /home/b/byte75tpe/asu24/public_html/index.php(200): PDO->prepare('UPDATE users SE...')
+#1 {main}
+  thrown in /home/b/byte75tpe/asu24/public_html/index.php on line 200
+[18-Jul-2026 11:07:43 Europe/Moscow] PHP Fatal error:  Uncaught PDOException: SQLSTATE[42S22]: Column not found: 1054 Unknown column 'password_changed_at' in 'field list' in /home/b/byte75tpe/asu24/public_html/index.php:200
+Stack trace:
+#0 /home/b/byte75tpe/asu24/public_html/index.php(200): PDO->prepare('UPDATE users SE...')
+#1 {main}
+  thrown in /home/b/byte75tpe/asu24/public_html/index.php on line 200
+[18-Jul-2026 17:40:35 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[18-Jul-2026 17:40:37 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[18-Jul-2026 17:40:42 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[22-Jul-2026 06:20:19 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[06-Aug-2026 21:43:39 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[06-Aug-2026 21:43:49 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[06-Aug-2026 21:43:50 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[06-Aug-2026 21:43:50 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[06-Aug-2026 21:43:51 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[06-Aug-2026 21:43:51 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[06-Aug-2026 21:43:53 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[15-Aug-2026 07:33:37 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:15 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:16 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:16 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:19 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:20 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:20 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:21 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:22 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:25 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:25 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:25 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:27 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:27 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:28 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:29 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:30 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:34 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:34 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:35 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:35 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:36 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[16-Aug-2026 20:15:36 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[16-Aug-2026 20:15:36 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[17-Aug-2026 00:00:47 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[17-Aug-2026 00:00:48 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[17-Aug-2026 00:00:48 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[17-Aug-2026 00:00:49 Europe/Moscow] Database connection error: SQLSTATE[08004] [1040] Too many connections
+[17-Aug-2026 00:00:49 Europe/Moscow] Database connection error: SQLSTATE[HY000] [1040] Too many connections
+[20-Aug-2026 11:03:00 Europe/Samara] Create mission error: Робот уже занят другим заказом.

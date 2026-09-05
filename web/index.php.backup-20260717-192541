@@ -1,0 +1,682 @@
+<?php
+declare(strict_types=1);
+
+require __DIR__ . '/inc/bootstrap.php';
+
+$path = request_path();
+$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+
+// Служебная проверка доступности.
+if ($path === '/health' && $method === 'GET') {
+    json_response(['status' => 'ok', 'service' => 'cloud-php', 'time' => date(DATE_ATOM)]);
+}
+
+// API синхронизации локального сервера. Совместим с edge/main.py из MVP.
+if ($path === '/api/edge/sync' && $method === 'POST') {
+    $payload = read_json_body();
+    $token = bearer_token();
+    $edgeId = trim((string)($payload['edge_id'] ?? ''));
+
+    if ($token === '' || $edgeId === '') {
+        json_response(['detail' => 'Требуются Edge ID и Bearer-токен'], 401);
+    }
+
+    $stmt = $pdo->prepare('SELECT * FROM edge_gateways WHERE edge_id=?');
+    $stmt->execute([$edgeId]);
+    $edge = $stmt->fetch();
+    if (!$edge || !password_verify($token, (string)$edge['token_hash'])) {
+        json_response(['detail' => 'Неверный Edge ID или токен'], 403);
+    }
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare('UPDATE edge_gateways SET last_seen_at=NOW() WHERE id=?')->execute([(int)$edge['id']]);
+        $acked = [];
+
+        foreach (($payload['events'] ?? []) as $event) {
+            if (!is_array($event)) {
+                continue;
+            }
+            $missionUid = trim((string)($event['mission_id'] ?? ''));
+            $eventUid = trim((string)($event['event_id'] ?? ''));
+            $eventType = trim((string)($event['event_type'] ?? ''));
+            if ($missionUid === '' || $eventUid === '' || $eventType === '') {
+                continue;
+            }
+
+            $stmt = $pdo->prepare(
+                'SELECT m.*, r.edge_gateway_id FROM missions m JOIN robots r ON r.id=m.robot_id '
+                . 'WHERE m.mission_uid=? AND r.edge_gateway_id=?'
+            );
+            $stmt->execute([$missionUid, (int)$edge['id']]);
+            $mission = $stmt->fetch();
+            if (!$mission) {
+                continue;
+            }
+
+            $payloadData = is_array($event['payload'] ?? null) ? $event['payload'] : [];
+            $inserted = add_event(
+                (int)$mission['id'],
+                strtoupper($eventType),
+                'edge',
+                $payloadData,
+                $eventUid,
+                isset($event['occurred_at']) ? (string)$event['occurred_at'] : null
+            );
+            if ($inserted) {
+                apply_edge_event($mission, $event);
+            }
+            $acked[] = $eventUid;
+        }
+
+        $stmt = $pdo->prepare(
+            'SELECT c.*, m.mission_uid FROM edge_commands c '
+            . 'LEFT JOIN missions m ON m.id=c.mission_id '
+            . 'WHERE c.edge_gateway_id=? AND c.status="pending" ORDER BY c.id LIMIT 50'
+        );
+        $stmt->execute([(int)$edge['id']]);
+        $commands = [];
+        foreach ($stmt->fetchAll() as $command) {
+            $commands[] = [
+                'command_id' => $command['command_uid'],
+                'type' => $command['command_type'],
+                'mission_id' => $command['mission_uid'],
+                'created_at' => date(DATE_ATOM, strtotime((string)$command['created_at'])),
+                'payload' => json_decode((string)$command['payload_json'], true) ?: [],
+            ];
+        }
+
+        $pdo->commit();
+        json_response([
+            'schema_version' => '1.0',
+            'server_time' => date(DATE_ATOM),
+            'acked_event_ids' => array_values(array_unique($acked)),
+            'commands' => $commands,
+        ]);
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        json_response(['detail' => 'Ошибка синхронизации', 'error' => $e->getMessage()], 500);
+    }
+}
+
+// API обновления карточки заказа в браузере.
+if ($method === 'GET' && preg_match('#^/api/missions/(\d+)$#', $path, $match)) {
+    $user = require_user();
+    $mission = mission_for_user((int)$match[1], $user);
+    $stmt = $pdo->prepare('SELECT event_type, source, occurred_at FROM mission_events WHERE mission_id=? ORDER BY occurred_at DESC, id DESC LIMIT 20');
+    $stmt->execute([(int)$mission['id']]);
+    $events = array_map(static function (array $event): array {
+        return [
+            'type' => $event['event_type'],
+            'label' => event_label((string)$event['event_type']),
+            'source' => $event['source'],
+            'occurred_at' => format_dt((string)$event['occurred_at']),
+        ];
+    }, $stmt->fetchAll());
+
+    json_response([
+        'id' => (int)$mission['id'],
+        'mission_id' => $mission['mission_uid'],
+        'status' => $mission['status'],
+        'status_label' => status_label((string)$mission['status']),
+        'status_class' => mission_status_class((string)$mission['status']),
+        'updated_at' => format_dt((string)$mission['updated_at']),
+        'events' => $events,
+    ]);
+}
+
+if ($path === '/' && $method === 'GET') {
+    redirect_to(current_user() ? '/dashboard' : '/login');
+}
+
+if ($path === '/login' && $method === 'GET') {
+    if (current_user()) {
+        redirect_to('/dashboard');
+    }
+    render_header('Вход');
+    ?>
+    <section class="card auth-card">
+        <div class="brand-row"><span class="brand-mark">RD</span><div><h1>Robot Delivery</h1><p>Диспетчерская система роботов-доставщиков</p></div></div>
+        <form method="post" action="<?= h(base_url('/login')) ?>" class="form-stack">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <label>Email<input type="email" name="email" autocomplete="username" required></label>
+            <label>Пароль<input type="password" name="password" autocomplete="current-password" required></label>
+            <button class="button primary" type="submit">Войти</button>
+        </form>
+        <p class="muted">Нет доступа? <a href="<?= h(base_url('/request-access')) ?>">Отправить заявку</a></p>
+    </section>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($path === '/login' && $method === 'POST') {
+    verify_csrf();
+    $email = strtolower(trim((string)($_POST['email'] ?? '')));
+    $password = (string)($_POST['password'] ?? '');
+    $stmt = $pdo->prepare('SELECT * FROM users WHERE email=? AND is_active=1');
+    $stmt->execute([$email]);
+    $user = $stmt->fetch();
+    if (!$user || !password_verify($password, (string)$user['password_hash'])) {
+        flash('danger', 'Неверный email или пароль.');
+        redirect_to('/login');
+    }
+    session_regenerate_id(true);
+    $_SESSION['user_id'] = (int)$user['id'];
+    $_SESSION['csrf'] = bin2hex(random_bytes(24));
+    redirect_to('/dashboard');
+}
+
+if ($path === '/logout' && $method === 'POST') {
+    verify_csrf();
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'] ?? '', $params['secure'], $params['httponly']);
+    }
+    session_destroy();
+    redirect_to('/login');
+}
+
+if ($path === '/request-access' && $method === 'GET') {
+    render_header('Заявка на доступ');
+    ?>
+    <section class="card auth-card">
+        <div class="brand-row"><span class="brand-mark">RD</span><div><h1>Заявка на доступ</h1><p>Открытой регистрации нет. Заявку рассмотрит администратор.</p></div></div>
+        <form method="post" action="<?= h(base_url('/request-access')) ?>" class="form-stack">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <label>ФИО<input name="full_name" required></label>
+            <label>Email<input type="email" name="email" required></label>
+            <label>Организация / подразделение<input name="organization" required></label>
+            <label>Зачем нужен доступ<textarea name="reason" required></textarea></label>
+            <button class="button primary" type="submit">Отправить заявку</button>
+        </form>
+        <p class="muted"><a href="<?= h(base_url('/login')) ?>">Вернуться ко входу</a></p>
+    </section>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($path === '/request-access' && $method === 'POST') {
+    verify_csrf();
+    $fullName = trim((string)($_POST['full_name'] ?? ''));
+    $email = strtolower(trim((string)($_POST['email'] ?? '')));
+    $organization = trim((string)($_POST['organization'] ?? ''));
+    $reason = trim((string)($_POST['reason'] ?? ''));
+    if ($fullName === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || $organization === '' || $reason === '') {
+        flash('danger', 'Заполните все поля корректно.');
+        redirect_to('/request-access');
+    }
+    $stmt = $pdo->prepare('INSERT INTO access_requests (full_name,email,organization,reason,status,created_at) VALUES (?,?,?,?,"pending",NOW())');
+    $stmt->execute([$fullName, $email, $organization, $reason]);
+    flash('success', 'Заявка отправлена. Администратор увидит её в личном кабинете.');
+    redirect_to('/request-access');
+}
+
+if ($method === 'GET' && preg_match('#^/activate/([A-Za-z0-9_-]+)$#', $path, $match)) {
+    $token = $match[1];
+    $stmt = $pdo->prepare('SELECT * FROM users WHERE activation_token=? AND is_active=0');
+    $stmt->execute([$token]);
+    $activationUser = $stmt->fetch();
+    if (!$activationUser) {
+        http_response_code(404);
+        exit('Ссылка активации недействительна или уже использована.');
+    }
+    render_header('Активация аккаунта');
+    ?>
+    <section class="card auth-card">
+        <div class="brand-row"><span class="brand-mark">RD</span><div><h1>Активация</h1><p><?= h($activationUser['email']) ?></p></div></div>
+        <form method="post" action="<?= h(base_url('/activate/' . $token)) ?>" class="form-stack">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <label>Новый пароль<input type="password" name="password" minlength="10" required></label>
+            <label>Повторите пароль<input type="password" name="password_repeat" minlength="10" required></label>
+            <button class="button primary" type="submit">Активировать аккаунт</button>
+        </form>
+    </section>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($method === 'POST' && preg_match('#^/activate/([A-Za-z0-9_-]+)$#', $path, $match)) {
+    verify_csrf();
+    $password = (string)($_POST['password'] ?? '');
+    if (strlen($password) < 10 || !hash_equals($password, (string)($_POST['password_repeat'] ?? ''))) {
+        flash('danger', 'Пароли не совпадают или короче 10 символов.');
+        redirect_to('/activate/' . $match[1]);
+    }
+    $stmt = $pdo->prepare('UPDATE users SET password_hash=?, is_active=1, activation_token=NULL WHERE activation_token=? AND is_active=0');
+    $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $match[1]]);
+    flash('success', 'Аккаунт активирован. Теперь можно войти.');
+    redirect_to('/login');
+}
+
+if ($path === '/dashboard' && $method === 'GET') {
+    $user = require_user();
+    $robotIds = assigned_robot_ids($user);
+    $robots = [];
+    $missions = [];
+    if ($robotIds) {
+        $placeholders = implode(',', array_fill(0, count($robotIds), '?'));
+        $stmt = $pdo->prepare(
+            "SELECT r.*, l.name current_location, e.name edge_name, e.last_seen_at, "
+            . "IF(e.last_seen_at IS NOT NULL AND TIMESTAMPDIFF(SECOND,e.last_seen_at,NOW()) < 40,1,0) edge_online "
+            . "FROM robots r LEFT JOIN locations l ON l.id=r.current_location_id JOIN edge_gateways e ON e.id=r.edge_gateway_id "
+            . "WHERE r.id IN ($placeholders) ORDER BY r.name"
+        );
+        $stmt->execute($robotIds);
+        $robots = $stmt->fetchAll();
+
+        $stmt = $pdo->prepare(
+            "SELECT m.*, r.name robot_name, p.name pickup_name, d.name destination_name "
+            . "FROM missions m JOIN robots r ON r.id=m.robot_id JOIN locations p ON p.id=m.pickup_location_id "
+            . "JOIN locations d ON d.id=m.destination_location_id WHERE m.robot_id IN ($placeholders) "
+            . "ORDER BY m.created_at DESC LIMIT 50"
+        );
+        $stmt->execute($robotIds);
+        $missions = $stmt->fetchAll();
+    }
+
+    $activeCount = count(array_filter($missions, static function (array $m): bool {
+        return !in_array($m['status'], ['completed', 'failed', 'cancelled'], true);
+    }));
+    $completedCount = count(array_filter($missions, static function (array $m): bool {
+        return $m['status'] === 'completed';
+    }));
+    render_header('Панель оператора', $user, 'dashboard');
+    page_title('Панель управления', 'Заказы и состояние назначенных роботов', '<a class="button primary" href="' . h(base_url('/missions/new')) . '">Создать заказ</a>');
+    ?>
+    <section class="grid cols-3">
+        <div class="card metric"><span>Доступно роботов</span><strong><?= count($robots) ?></strong></div>
+        <div class="card metric"><span>Активных заказов</span><strong><?= $activeCount ?></strong></div>
+        <div class="card metric"><span>Завершено</span><strong><?= $completedCount ?></strong></div>
+    </section>
+
+    <section class="section">
+        <div class="section-title"><h2>Роботы</h2></div>
+        <?php if (!$robots): ?>
+            <?php empty_state('Нет назначенных роботов', 'Администратор должен назначить робота вашему аккаунту.'); ?>
+        <?php else: ?>
+            <div class="grid cols-2">
+                <?php foreach ($robots as $robot): ?>
+                    <article class="card card-pad">
+                        <div class="item-card-head"><div><h3><?= h($robot['name']) ?></h3><p class="mono"><?= h($robot['robot_uid']) ?></p></div><span class="<?= $robot['edge_online'] ? 'status success' : 'status danger' ?>"><?= $robot['edge_online'] ? 'Edge на связи' : 'Edge не отвечает' ?></span></div>
+                        <div class="detail-list section">
+                            <div><span>Состояние</span><strong><?= h($robot['status']) ?></strong></div>
+                            <div><span>Заряд</span><strong><?= $robot['battery_percent'] !== null ? (int)$robot['battery_percent'] . '%' : '—' ?></strong></div>
+                            <div><span>Точка</span><strong><?= h($robot['current_location'] ?: 'Не определена') ?></strong></div>
+                            <div><span>Последняя связь</span><strong><?= h(format_dt($robot['last_seen_at'])) ?></strong></div>
+                        </div>
+                    </article>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </section>
+
+    <section class="section">
+        <div class="section-title"><h2>Последние заказы</h2></div>
+        <?php if (!$missions): ?>
+            <?php empty_state('Заказов пока нет', 'Создайте первый заказ и выберите точки погрузки и доставки.'); ?>
+        <?php else: ?>
+            <div class="table-wrap"><table><thead><tr><th>Заказ</th><th>Робот</th><th>Маршрут</th><th>Статус</th><th>Создан</th></tr></thead><tbody>
+            <?php foreach ($missions as $mission): ?>
+                <tr>
+                    <td><a href="<?= h(base_url('/missions/' . $mission['id'])) ?>"><strong><?= h(substr($mission['mission_uid'], 0, 8)) ?></strong></a></td>
+                    <td><?= h($mission['robot_name']) ?></td>
+                    <td><?= h($mission['pickup_name']) ?> → <?= h($mission['destination_name']) ?></td>
+                    <td><span class="<?= h(mission_status_class((string)$mission['status'])) ?>"><?= h(status_label((string)$mission['status'])) ?></span></td>
+                    <td><?= h(format_dt($mission['created_at'])) ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody></table></div>
+        <?php endif; ?>
+    </section>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($path === '/missions/new' && $method === 'GET') {
+    $user = require_user();
+    $robotIds = assigned_robot_ids($user);
+    $robots = [];
+    if ($robotIds) {
+        $placeholders = implode(',', array_fill(0, count($robotIds), '?'));
+        $stmt = $pdo->prepare("SELECT * FROM robots WHERE id IN ($placeholders) ORDER BY name");
+        $stmt->execute($robotIds);
+        $robots = $stmt->fetchAll();
+    }
+    $locations = $pdo->query('SELECT * FROM locations ORDER BY kind="base" DESC, name')->fetchAll();
+    $cards = $pdo->query('SELECT c.*, r.full_name recipient_name, r.department FROM rfid_cards c JOIN recipients r ON r.id=c.recipient_id WHERE c.is_active=1 ORDER BY r.full_name,c.label')->fetchAll();
+    render_header('Новый заказ', $user, 'new');
+    page_title('Новый заказ', 'Пакет миссии будет заранее сохранён локальным сервером и затем передан Orange Pi');
+    ?>
+    <section class="card card-pad">
+        <form method="post" action="<?= h(base_url('/missions/new')) ?>" class="form-grid">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <label>Робот<select name="robot_id" required><option value="">Выберите</option><?php foreach ($robots as $robot): ?><option value="<?= (int)$robot['id'] ?>"><?= h($robot['name']) ?> · <?= h($robot['robot_uid']) ?></option><?php endforeach; ?></select></label>
+            <label>Описание груза<input name="cargo_description" placeholder="Документы, макет, посылка" required></label>
+            <label>Точка погрузки<select name="pickup_location_id" required><option value="">Выберите</option><?php foreach ($locations as $location): ?><option value="<?= (int)$location['id'] ?>"><?= h($location['name']) ?> · маркер <?= h((string)$location['marker_id']) ?></option><?php endforeach; ?></select></label>
+            <label>Точка доставки<select name="destination_location_id" required><option value="">Выберите</option><?php foreach ($locations as $location): ?><option value="<?= (int)$location['id'] ?>"><?= h($location['name']) ?> · маркер <?= h((string)$location['marker_id']) ?></option><?php endforeach; ?></select></label>
+            <fieldset class="wide"><legend>RFID-карты, которыми можно открыть отсек</legend><div class="check-list">
+                <?php if (!$cards): ?><p class="muted">RFID-карт нет. Резервный PIN всё равно будет создан.</p><?php endif; ?>
+                <?php foreach ($cards as $card): ?><label class="check-row"><input type="checkbox" name="rfid_ids[]" value="<?= (int)$card['id'] ?>"><span><strong><?= h($card['recipient_name']) ?></strong> · <?= h($card['label']) ?> · <span class="mono"><?= h($card['uid']) ?></span></span></label><?php endforeach; ?>
+            </div></fieldset>
+            <div class="alert info wide">Система создаст резервный шестизначный PIN. Он будет виден оператору в карточке заказа и передан в автономный пакет миссии.</div>
+            <button class="button primary wide" type="submit" <?= !$robots ? 'disabled' : '' ?>>Создать и отправить заказ на Edge</button>
+        </form>
+    </section>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($path === '/missions/new' && $method === 'POST') {
+    verify_csrf();
+    $user = require_user();
+    $robotId = (int)($_POST['robot_id'] ?? 0);
+    $pickupId = (int)($_POST['pickup_location_id'] ?? 0);
+    $destinationId = (int)($_POST['destination_location_id'] ?? 0);
+    $cargo = trim((string)($_POST['cargo_description'] ?? ''));
+    $rfidIds = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['rfid_ids'] ?? [])))));
+
+    if (!in_array($robotId, assigned_robot_ids($user), true) || $pickupId <= 0 || $destinationId <= 0 || $pickupId === $destinationId || $cargo === '') {
+        flash('danger', 'Проверьте робота, точки маршрута и описание груза.');
+        redirect_to('/missions/new');
+    }
+
+    $baseId = (int)$pdo->query("SELECT id FROM locations WHERE kind='base' ORDER BY id LIMIT 1")->fetchColumn();
+    if ($baseId <= 0) {
+        flash('danger', 'Не настроена базовая точка робота.');
+        redirect_to('/missions/new');
+    }
+
+    $pin = random_pin();
+    $pdo->beginTransaction();
+    try {
+        $uid = uuid4();
+        $stmt = $pdo->prepare('INSERT INTO missions (mission_uid,robot_id,operator_id,pickup_location_id,destination_location_id,base_location_id,cargo_description,status,pin_hash,pin_encrypted,created_at,updated_at) VALUES (?,?,?,?,?,?,?,"created",?,?,NOW(),NOW())');
+        $stmt->execute([
+            $uid,
+            $robotId,
+            (int)$user['id'],
+            $pickupId,
+            $destinationId,
+            $baseId,
+            $cargo,
+            password_hash($pin, PASSWORD_DEFAULT),
+            app_encrypt($pin),
+        ]);
+        $missionId = (int)$pdo->lastInsertId();
+        if ($rfidIds) {
+            $allowedStmt = $pdo->prepare('SELECT id FROM rfid_cards WHERE id=? AND is_active=1');
+            $linkStmt = $pdo->prepare('INSERT IGNORE INTO mission_rfid (mission_id,rfid_card_id) VALUES (?,?)');
+            foreach ($rfidIds as $cardId) {
+                $allowedStmt->execute([$cardId]);
+                if ($allowedStmt->fetchColumn()) {
+                    $linkStmt->execute([$missionId, $cardId]);
+                }
+            }
+        }
+        $mission = mission_for_user($missionId, $user);
+        create_command($mission, 'stage_mission', mission_package($mission));
+        add_event($missionId, 'ORDER_CREATED', 'cloud', ['operator_id' => (int)$user['id']]);
+        $pdo->commit();
+        flash('success', 'Заказ создан. Edge заберёт его при следующей синхронизации.');
+        redirect_to('/missions/' . $missionId);
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        flash('danger', 'Не удалось создать заказ: ' . $e->getMessage());
+        redirect_to('/missions/new');
+    }
+}
+
+if ($method === 'GET' && preg_match('#^/missions/(\d+)$#', $path, $match)) {
+    $user = require_user();
+    $mission = mission_for_user((int)$match[1], $user);
+    $stmt = $pdo->prepare('SELECT c.*, r.full_name recipient_name FROM mission_rfid mr JOIN rfid_cards c ON c.id=mr.rfid_card_id JOIN recipients r ON r.id=c.recipient_id WHERE mr.mission_id=? ORDER BY r.full_name');
+    $stmt->execute([(int)$mission['id']]);
+    $cards = $stmt->fetchAll();
+    $stmt = $pdo->prepare('SELECT * FROM mission_events WHERE mission_id=? ORDER BY occurred_at DESC,id DESC LIMIT 30');
+    $stmt->execute([(int)$mission['id']]);
+    $events = $stmt->fetchAll();
+    render_header('Заказ ' . substr((string)$mission['mission_uid'], 0, 8), $user);
+    page_title('Заказ ' . substr((string)$mission['mission_uid'], 0, 8), $mission['pickup_name'] . ' → ' . $mission['destination_name'], '<a class="button secondary" href="' . h(base_url('/dashboard')) . '">К списку</a>');
+    ?>
+    <div class="split" data-mission-poll="<?= h(base_url('/api/missions/' . $mission['id'])) ?>">
+        <div class="stack">
+            <section class="card card-pad">
+                <div class="item-card-head"><div><span class="muted">Текущий статус</span><h2><span data-mission-status class="<?= h(mission_status_class((string)$mission['status'])) ?>"><?= h(status_label((string)$mission['status'])) ?></span></h2></div><span class="mono muted"><?= h($mission['mission_uid']) ?></span></div>
+                <div class="detail-list section">
+                    <div><span>Робот</span><strong><?= h($mission['robot_name']) ?></strong></div>
+                    <div><span>Оператор</span><strong><?= h($mission['operator_name']) ?></strong></div>
+                    <div><span>Погрузка</span><strong><?= h($mission['pickup_name']) ?></strong></div>
+                    <div><span>Доставка</span><strong><?= h($mission['destination_name']) ?></strong></div>
+                    <div><span>Возврат</span><strong><?= h($mission['base_name']) ?></strong></div>
+                    <div><span>Обновлено</span><strong data-mission-updated><?= h(format_dt($mission['updated_at'])) ?></strong></div>
+                    <div class="wide"><span>Груз</span><strong><?= h($mission['cargo_description']) ?></strong></div>
+                </div>
+                <div class="section pin-box"><div><span>Резервный PIN</span><p class="muted">Передайте получателю по доверенному каналу</p></div><code><?= h(app_decrypt((string)$mission['pin_encrypted'])) ?></code></div>
+                <div class="section"><span class="muted">Разрешённые RFID</span><div class="chips"><?php if (!$cards): ?><span class="chip">Не выбраны — доступен PIN</span><?php endif; ?><?php foreach ($cards as $card): ?><span class="chip"><?= h($card['recipient_name']) ?> · <span class="mono"><?= h($card['uid']) ?></span></span><?php endforeach; ?></div></div>
+                <div class="actions">
+                    <?php if (in_array($mission['status'], ['ready_for_loading','edge_accepted'], true)): ?>
+                        <form method="post" action="<?= h(base_url('/missions/' . $mission['id'] . '/confirm-loaded')) ?>"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><button class="button primary" type="submit">Погрузка завершена — старт</button></form>
+                    <?php endif; ?>
+                    <?php if (!in_array($mission['status'], ['completed','cancelled','failed'], true)): ?>
+                        <form method="post" action="<?= h(base_url('/missions/' . $mission['id'] . '/cancel')) ?>"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><button class="button danger" data-confirm="Отменить заказ? Команда будет передана Edge." type="submit">Отменить</button></form>
+                    <?php endif; ?>
+                </div>
+            </section>
+        </div>
+        <aside class="card card-pad"><div class="section-title"><h2>Журнал событий</h2></div><ol class="timeline" data-event-list>
+            <?php foreach ($events as $event): ?><li><span class="event-dot"></span><div><strong><?= h(event_label((string)$event['event_type'])) ?></strong><small><?= h($event['source']) ?> · <?= h(format_dt($event['occurred_at'])) ?></small></div></li><?php endforeach; ?>
+        </ol></aside>
+    </div>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($method === 'POST' && preg_match('#^/missions/(\d+)/confirm-loaded$#', $path, $match)) {
+    verify_csrf();
+    $user = require_user();
+    $mission = mission_for_user((int)$match[1], $user);
+    if (!in_array($mission['status'], ['ready_for_loading','edge_accepted'], true)) {
+        flash('warning', 'Запуск недоступен в текущем состоянии.');
+        redirect_to('/missions/' . $mission['id']);
+    }
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare('UPDATE missions SET status="start_requested" WHERE id=?')->execute([(int)$mission['id']]);
+        create_command($mission, 'start_mission', ['schema_version' => '1.0', 'mission_id' => $mission['mission_uid']]);
+        add_event((int)$mission['id'], 'LOADING_CONFIRMED', 'cloud', ['operator_id' => (int)$user['id']]);
+        $pdo->commit();
+        flash('success', 'Команда запуска поставлена в очередь.');
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        flash('danger', 'Ошибка запуска: ' . $e->getMessage());
+    }
+    redirect_to('/missions/' . $mission['id']);
+}
+
+if ($method === 'POST' && preg_match('#^/missions/(\d+)/cancel$#', $path, $match)) {
+    verify_csrf();
+    $user = require_user();
+    $mission = mission_for_user((int)$match[1], $user);
+    if (!in_array($mission['status'], ['completed','cancelled'], true)) {
+        $pdo->beginTransaction();
+        try {
+            $pdo->prepare('UPDATE missions SET status="cancelled" WHERE id=?')->execute([(int)$mission['id']]);
+            create_command($mission, 'cancel_mission', ['schema_version' => '1.0', 'mission_id' => $mission['mission_uid']]);
+            add_event((int)$mission['id'], 'CANCEL_REQUESTED', 'cloud', ['operator_id' => (int)$user['id']]);
+            $pdo->commit();
+            flash('success', 'Заказ отменён. Команда будет передана Edge.');
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            flash('danger', 'Ошибка отмены: ' . $e->getMessage());
+        }
+    }
+    redirect_to('/missions/' . $mission['id']);
+}
+
+if ($path === '/admin/requests' && $method === 'GET') {
+    $user = require_admin();
+    $requests = $pdo->query('SELECT * FROM access_requests ORDER BY created_at DESC')->fetchAll();
+    render_header('Заявки на доступ', $user, 'requests');
+    page_title('Заявки на доступ', 'После одобрения появится одноразовая ссылка активации');
+    ?>
+    <div class="stack">
+        <?php if (!$requests): ?><?php empty_state('Заявок нет', 'Новые заявки с публичной формы появятся здесь.'); ?><?php endif; ?>
+        <?php foreach ($requests as $request): ?>
+            <article class="card item-card">
+                <div class="item-card-head"><div><h3><?= h($request['full_name']) ?></h3><p><?= h($request['email']) ?> · <?= h($request['organization']) ?></p></div><span class="<?= $request['status'] === 'approved' ? 'status success' : ($request['status'] === 'rejected' ? 'status danger' : 'status progress') ?>"><?= h($request['status']) ?></span></div>
+                <p class="section"><?= nl2br(h($request['reason'])) ?></p>
+                <?php if ($request['status'] === 'pending'): ?><div class="actions">
+                    <form method="post" action="<?= h(base_url('/admin/requests/' . $request['id'] . '/approve')) ?>"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><button class="button primary small" type="submit">Одобрить</button></form>
+                    <form method="post" action="<?= h(base_url('/admin/requests/' . $request['id'] . '/reject')) ?>" class="inline-form"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><label>Комментарий<input name="admin_comment"></label><button class="button danger small" type="submit">Отклонить</button></form>
+                </div><?php endif; ?>
+            </article>
+        <?php endforeach; ?>
+    </div>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($method === 'POST' && preg_match('#^/admin/requests/(\d+)/approve$#', $path, $match)) {
+    verify_csrf();
+    require_admin();
+    $stmt = $pdo->prepare('SELECT * FROM access_requests WHERE id=?');
+    $stmt->execute([(int)$match[1]]);
+    $request = $stmt->fetch();
+    if (!$request) { http_response_code(404); exit('Заявка не найдена.'); }
+    $token = bin2hex(random_bytes(24));
+    $stmt = $pdo->prepare('SELECT id FROM users WHERE email=?');
+    $stmt->execute([strtolower((string)$request['email'])]);
+    $existingId = (int)$stmt->fetchColumn();
+    if ($existingId) {
+        $pdo->prepare('UPDATE users SET full_name=?,role="operator",is_active=0,activation_token=? WHERE id=?')->execute([$request['full_name'],$token,$existingId]);
+    } else {
+        $pdo->prepare('INSERT INTO users (email,full_name,password_hash,role,is_active,activation_token,created_at) VALUES (?,?,?,"operator",0,?,NOW())')->execute([
+            strtolower((string)$request['email']),
+            $request['full_name'],
+            password_hash(bin2hex(random_bytes(24)), PASSWORD_DEFAULT),
+            $token,
+        ]);
+    }
+    $pdo->prepare('UPDATE access_requests SET status="approved",reviewed_at=NOW() WHERE id=?')->execute([(int)$request['id']]);
+    flash('success', 'Заявка одобрена. Ссылка активации доступна в разделе «Пользователи».');
+    redirect_to('/admin/requests');
+}
+
+if ($method === 'POST' && preg_match('#^/admin/requests/(\d+)/reject$#', $path, $match)) {
+    verify_csrf();
+    require_admin();
+    $pdo->prepare('UPDATE access_requests SET status="rejected",admin_comment=?,reviewed_at=NOW() WHERE id=?')->execute([trim((string)($_POST['admin_comment'] ?? '')),(int)$match[1]]);
+    flash('success', 'Заявка отклонена.');
+    redirect_to('/admin/requests');
+}
+
+if ($path === '/admin/users' && $method === 'GET') {
+    $user = require_admin();
+    $users = $pdo->query('SELECT * FROM users ORDER BY created_at DESC')->fetchAll();
+    $robots = $pdo->query('SELECT * FROM robots ORDER BY name')->fetchAll();
+    $assignments = [];
+    foreach ($pdo->query('SELECT ra.*,r.name robot_name FROM robot_assignments ra JOIN robots r ON r.id=ra.robot_id')->fetchAll() as $row) {
+        $assignments[(int)$row['user_id']][] = $row;
+    }
+    render_header('Пользователи', $user, 'users');
+    page_title('Пользователи и роботы', 'Оператор видит только назначенных ему роботов');
+    ?>
+    <div class="stack">
+    <?php foreach ($users as $item): ?>
+        <article class="card item-card">
+            <div class="item-card-head"><div><h3><?= h($item['full_name']) ?></h3><p><?= h($item['email']) ?> · <?= h($item['role']) ?></p></div><span class="<?= $item['is_active'] ? 'status success' : 'status progress' ?>"><?= $item['is_active'] ? 'Активен' : 'Ждёт активации' ?></span></div>
+            <?php if (!$item['is_active'] && $item['activation_token']): ?><div class="alert info section">Ссылка активации: <code><?= h(base_url('/activate/' . $item['activation_token'])) ?></code></div><?php endif; ?>
+            <div class="chips"><?php foreach (($assignments[(int)$item['id']] ?? []) as $assignment): ?><span class="chip"><?= h($assignment['robot_name']) ?><form method="post" action="<?= h(base_url('/admin/users/' . $item['id'] . '/remove-robot/' . $assignment['robot_id'])) ?>"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><button class="link-button" type="submit">×</button></form></span><?php endforeach; ?></div>
+            <?php if ($item['role'] === 'operator'): ?><form method="post" action="<?= h(base_url('/admin/users/' . $item['id'] . '/assign-robot')) ?>" class="inline-form"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><label>Назначить робота<select name="robot_id" required><option value="">Выберите</option><?php foreach ($robots as $robot): ?><option value="<?= (int)$robot['id'] ?>"><?= h($robot['name']) ?></option><?php endforeach; ?></select></label><button class="button secondary small" type="submit">Назначить</button></form><?php endif; ?>
+        </article>
+    <?php endforeach; ?>
+    </div>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($method === 'POST' && preg_match('#^/admin/users/(\d+)/assign-robot$#', $path, $match)) {
+    verify_csrf(); require_admin();
+    $pdo->prepare('INSERT IGNORE INTO robot_assignments (user_id,robot_id) VALUES (?,?)')->execute([(int)$match[1],(int)($_POST['robot_id'] ?? 0)]);
+    flash('success','Робот назначен.'); redirect_to('/admin/users');
+}
+
+if ($method === 'POST' && preg_match('#^/admin/users/(\d+)/remove-robot/(\d+)$#', $path, $match)) {
+    verify_csrf(); require_admin();
+    $pdo->prepare('DELETE FROM robot_assignments WHERE user_id=? AND robot_id=?')->execute([(int)$match[1],(int)$match[2]]);
+    flash('success','Назначение удалено.'); redirect_to('/admin/users');
+}
+
+if ($path === '/recipients' && $method === 'GET') {
+    $user = require_user();
+    $recipients = $pdo->query('SELECT * FROM recipients ORDER BY full_name')->fetchAll();
+    $cardsByRecipient = [];
+    foreach ($pdo->query('SELECT * FROM rfid_cards ORDER BY label')->fetchAll() as $card) {
+        $cardsByRecipient[(int)$card['recipient_id']][] = $card;
+    }
+    render_header('Получатели и RFID', $user, 'recipients');
+    page_title('Получатели и RFID', 'Выберите разрешённые карточки при создании заказа');
+    ?>
+    <section class="card card-pad">
+        <form method="post" action="<?= h(base_url('/recipients')) ?>" class="form-grid">
+            <input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>">
+            <label>ФИО сотрудника<input name="full_name" required></label>
+            <label>Подразделение<input name="department"></label>
+            <button class="button primary wide" type="submit">Добавить получателя</button>
+        </form>
+    </section>
+    <div class="stack section">
+        <?php foreach ($recipients as $recipient): ?>
+            <article class="card item-card">
+                <div class="item-card-head"><div><h3><?= h($recipient['full_name']) ?></h3><p><?= h($recipient['department']) ?></p></div></div>
+                <div class="chips"><?php foreach (($cardsByRecipient[(int)$recipient['id']] ?? []) as $card): ?><span class="chip"><?= h($card['label']) ?> · <span class="mono"><?= h($card['uid']) ?></span></span><?php endforeach; ?></div>
+                <form method="post" action="<?= h(base_url('/recipients/' . $recipient['id'] . '/cards')) ?>" class="inline-form"><input type="hidden" name="csrf" value="<?= h(csrf_token()) ?>"><label>UID карты<input name="uid" placeholder="04-A1-B2-C3-D4" required></label><label>Название<input name="label" placeholder="Пропуск сотрудника" required></label><button class="button secondary small" type="submit">Добавить RFID</button></form>
+            </article>
+        <?php endforeach; ?>
+    </div>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($path === '/recipients' && $method === 'POST') {
+    verify_csrf(); require_user();
+    $fullName = trim((string)($_POST['full_name'] ?? ''));
+    if ($fullName === '') { flash('danger','Укажите ФИО.'); redirect_to('/recipients'); }
+    $pdo->prepare('INSERT INTO recipients (full_name,department,created_at) VALUES (?,?,NOW())')->execute([$fullName,trim((string)($_POST['department'] ?? ''))]);
+    flash('success','Получатель добавлен.'); redirect_to('/recipients');
+}
+
+if ($method === 'POST' && preg_match('#^/recipients/(\d+)/cards$#', $path, $match)) {
+    verify_csrf(); require_user();
+    $uid = strtoupper(trim((string)($_POST['uid'] ?? '')));
+    $label = trim((string)($_POST['label'] ?? ''));
+    if ($uid === '' || $label === '') { flash('danger','Заполните UID и название карты.'); redirect_to('/recipients'); }
+    try {
+        $pdo->prepare('INSERT INTO rfid_cards (uid,label,recipient_id,is_active,created_at) VALUES (?,?,?,1,NOW())')->execute([$uid,$label,(int)$match[1]]);
+        flash('success','RFID-карта добавлена.');
+    } catch (PDOException $e) {
+        flash('danger','Такая RFID-карта уже существует.');
+    }
+    redirect_to('/recipients');
+}
+
+http_response_code(404);
+$user = current_user();
+render_header('Страница не найдена', $user ?: null);
+?>
+<section class="card auth-card"><h1>404</h1><p class="muted">Страница не найдена.</p><a class="button primary" href="<?= h(base_url($user ? '/dashboard' : '/login')) ?>">Вернуться</a></section>
+<?php render_footer();
